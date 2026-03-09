@@ -16,25 +16,32 @@ if (!fs.existsSync(DONE_DIR)) fs.mkdirSync(DONE_DIR, { recursive: true });
 /**
  * Jalankan satu task otomasi (upload + jadwal posting)
  * @param {string} sessionName - nama sesi yang digunakan
- * @param {object} task - { filePath, assetId, caption, date, hour }
+ * @param {object} task - { filePath, assetId, caption, date, hour, _originalUrl? }
  * @param {object} botState - state global untuk update status real-time
+ *
+ * Catatan: jika task berasal dari URL, task._originalUrl akan terisi
+ * dan task.filePath sudah berupa path lokal temp (sudah didownload di queue.service).
+ * Penghapusan file temp dilakukan di queue.service, bukan di sini.
  */
 async function runTask(sessionName, task, botState) {
     const sessionPath = getSessionPath(sessionName);
     const fileName = path.basename(task.filePath);
     const fileType = getFileType(task.filePath);
+    const isFromUrl = !!task._originalUrl; // flag: file berasal dari URL
 
     // Update status real-time
     botState.in_progress = {
-        file: fileName,
+        file: isFromUrl ? task._originalUrl : fileName,
         type: fileType,
         session: sessionName,
         assetId: task.assetId,
         scheduled: `${task.date} ${task.hour}:00`,
         start_time: new Date().toLocaleTimeString(),
+        source: isFromUrl ? "url" : "local",
     };
 
     console.log(`\n[TASK] Mulai → ${fileName} (${fileType}) | Jadwal: ${task.date} ${task.hour}:00`);
+    if (isFromUrl) console.log(`[TASK] Sumber: URL → ${task._originalUrl}`);
 
     let context = null;
 
@@ -68,17 +75,21 @@ async function runTask(sessionName, task, botState) {
 
         console.log(`[TASK] ✓ Sukses! ${fileName}`);
 
-        // Pindahkan file ke folder /selesai
-        const destPath = path.join(DONE_DIR, fileName);
-        await fs.promises.rename(task.filePath, destPath);
-        console.log(`[TASK] File dipindahkan ke /selesai`);
+        // ── Pindahkan file ke /selesai HANYA jika file lokal (bukan dari URL)
+        // File dari URL sudah dihandle (dihapus) oleh queue.service setelah task ini return
+        if (!isFromUrl) {
+            const destPath = path.join(DONE_DIR, fileName);
+            await fs.promises.rename(task.filePath, destPath);
+            console.log(`[TASK] File dipindahkan ke /selesai`);
+        }
 
         return {
             success: true,
-            file: fileName,
+            file: isFromUrl ? task._originalUrl : fileName,
             type: fileType,
             status: "Success",
             scheduled: `${task.date} ${task.hour}:00`,
+            source: isFromUrl ? "url" : "local",
             time: new Date().toLocaleTimeString(),
         };
 
@@ -86,9 +97,10 @@ async function runTask(sessionName, task, botState) {
         console.error(`[TASK] ✗ Error: ${err.message}`);
         return {
             success: false,
-            file: fileName,
+            file: isFromUrl ? task._originalUrl : fileName,
             type: fileType,
             error: err.message,
+            source: isFromUrl ? "url" : "local",
             time: new Date().toLocaleTimeString(),
         };
 
@@ -114,43 +126,37 @@ async function uploadVideo(page, task) {
     await page.waitForSelector('div[role="textbox"]', { timeout: 30000 });
     await page.fill('div[role="textbox"]', task.caption);
 
-    // Tunggu upload selesai 100%
-    console.log(`[TASK] Menunggu upload video selesai (100%)...`);
-    await page.waitForSelector('text="100%"', { timeout: 600000 });
-    await page.waitForTimeout(5000);
-
-    // Klik Next (1): ke halaman berikutnya
-    console.log(`[TASK] Klik Next (1)...`);
-    await page.click('div[role="button"]:has-text("Next"), button:has-text("Next")');
-    await page.waitForTimeout(7000);
-
-    // Klik Next (2): lewati halaman Audio
-    await page.waitForSelector('text="Audio"', { visible: true, timeout: 30000 });
-    console.log(`[TASK] Klik Next (2)...`);
-    await page.click('div[role="button"]:has-text("Next"), button:has-text("Next") >> nth=-1');
-    await page.waitForTimeout(7000);
+    // Tunggu upload selesai (progress bar hilang)
+    console.log(`[TASK] Menunggu upload selesai...`);
+    await page.waitForSelector('.upload-progress', { state: 'detached', timeout: 300000 }).catch(() => {});
+    await page.waitForTimeout(3000);
 }
 
 // =============================================
-// Flow Upload IMAGE (Photo Post)
+// Flow Upload IMAGE (Post)
 // =============================================
 async function uploadImage(page, task) {
-    console.log(`[TASK] Upload gambar...`);
+    console.log(`[TASK] Upload image...`);
     const fileChooserPromise = page.waitForEvent("filechooser");
 
-    await page.click(
-        'text="Photo/video", [aria-label="Photo/video"], [data-testid="media-attachment-button"], text="Add photos"'
-    );
+    // Coba selector satu per satu — tidak bisa dicampur CSS + text selector dalam satu string
+    const clicked = await page.locator('[aria-label="Photo/video"]').first().click({ timeout: 5000 }).then(() => true).catch(() => false)
+        || await page.locator('[data-testid="media-attachment-button"]').first().click({ timeout: 5000 }).then(() => true).catch(() => false)
+        || await page.getByText("Photo/Video", { exact: false }).first().click({ timeout: 5000 }).then(() => true).catch(() => false)
+        || await page.getByText("Add photos/videos", { exact: false }).first().click({ timeout: 5000 }).then(() => true).catch(() => false)
+        || await page.getByText("Photo", { exact: true }).first().click({ timeout: 5000 }).then(() => true).catch(() => false);
+
+    if (!clicked) {
+        throw new Error("Tidak bisa menemukan tombol upload photo. Pastikan halaman composer sudah terbuka.");
+    }
+
     const fileChooser = await fileChooserPromise;
     await fileChooser.setFiles(task.filePath);
-
-    // Tunggu preview gambar muncul
-    console.log(`[TASK] Menunggu gambar diproses...`);
-    await page.waitForTimeout(5000);
 
     // Isi caption
     await page.waitForSelector('div[role="textbox"]', { timeout: 30000 });
     await page.fill('div[role="textbox"]', task.caption);
+
     await page.waitForTimeout(3000);
 }
 

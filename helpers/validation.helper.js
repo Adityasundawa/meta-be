@@ -5,9 +5,12 @@
 const fs = require("fs");
 const { getSessionStatus } = require("./session.helper");
 const { getFileType } = require("./file.helper");
+const { isUrl, getExtFromUrl } = require("./download.helper");
+const { VIDEO_EXTS, IMAGE_EXTS } = require("../config/app.config");
 
 /**
  * Validasi semua task sebelum diproses
+ * filePath bisa berupa path lokal ATAU URL (http/https)
  * @returns Array error (kosong jika semua valid)
  */
 function validateTasks(sessionName, tasks) {
@@ -28,29 +31,49 @@ function validateTasks(sessionName, tasks) {
     tasks.forEach((task, i) => {
         const prefix = `Task[${i}]`;
 
-        // Validasi filePath
+        // ── Validasi filePath ──────────────────────────────────────
         if (!task.filePath || typeof task.filePath !== "string") {
-            errors.push({ index: i, field: "filePath", message: `${prefix}: 'filePath' wajib diisi.` });
-        } else if (!fs.existsSync(task.filePath)) {
-            errors.push({ index: i, field: "filePath", message: `${prefix}: File tidak ditemukan → ${task.filePath}` });
+            errors.push({ index: i, field: "filePath", message: `${prefix}: 'filePath' wajib diisi (path lokal atau URL).` });
+        } else if (isUrl(task.filePath)) {
+            // Validasi URL: cek ekstensi dari URL-nya
+            const ext = getExtFromUrl(task.filePath);
+            if (!ext) {
+                // Tidak ada ekstensi di URL → warning saja, tetap lanjut
+                // (beberapa URL tidak menyertakan ekstensi, mis. signed URL)
+                console.warn(`[VALIDATE] Task[${i}]: URL tidak memiliki ekstensi jelas → ${task.filePath}`);
+            } else {
+                const allSupportedExts = [...VIDEO_EXTS, ...IMAGE_EXTS];
+                if (!allSupportedExts.includes(ext)) {
+                    errors.push({
+                        index: i,
+                        field: "filePath",
+                        message: `${prefix}: Ekstensi '${ext}' tidak didukung. Gunakan mp4/jpg/png dll.`,
+                    });
+                }
+            }
         } else {
-            const type = getFileType(task.filePath);
-            if (type === "unknown") {
-                errors.push({ index: i, field: "filePath", message: `${prefix}: Ekstensi tidak didukung. Gunakan mp4/jpg/png dll.` });
+            // Path lokal: cek file exists & ekstensi
+            if (!fs.existsSync(task.filePath)) {
+                errors.push({ index: i, field: "filePath", message: `${prefix}: File tidak ditemukan → ${task.filePath}` });
+            } else {
+                const type = getFileType(task.filePath);
+                if (type === "unknown") {
+                    errors.push({ index: i, field: "filePath", message: `${prefix}: Ekstensi tidak didukung. Gunakan mp4/jpg/png dll.` });
+                }
             }
         }
 
-        // Validasi assetId
+        // ── Validasi assetId ───────────────────────────────────────
         if (!task.assetId || typeof task.assetId !== "string") {
             errors.push({ index: i, field: "assetId", message: `${prefix}: 'assetId' wajib diisi.` });
         }
 
-        // Validasi caption
+        // ── Validasi caption ───────────────────────────────────────
         if (!task.caption || typeof task.caption !== "string") {
             errors.push({ index: i, field: "caption", message: `${prefix}: 'caption' wajib diisi.` });
         }
 
-        // Validasi format tanggal DD/MM/YYYY
+        // ── Validasi format tanggal DD/MM/YYYY ────────────────────
         if (!task.date || typeof task.date !== "string") {
             errors.push({ index: i, field: "date", message: `${prefix}: 'date' wajib diisi format DD/MM/YYYY.` });
         } else {
@@ -68,7 +91,7 @@ function validateTasks(sessionName, tasks) {
             }
         }
 
-        // Validasi jam (0–23)
+        // ── Validasi jam (0–23) ───────────────────────────────────
         if (task.hour === undefined || task.hour === null || task.hour === "") {
             errors.push({ index: i, field: "hour", message: `${prefix}: 'hour' wajib diisi (misal: "10" untuk jam 10).` });
         } else {
